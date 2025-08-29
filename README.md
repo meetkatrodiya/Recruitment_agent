@@ -79,6 +79,8 @@ OPENAI_API_KEY=sk-...your-valid-key...
 # Optional (sensible defaults are used if omitted)
 OPENAI_CHAT_MODEL=gpt-4o
 OPENAI_TEMPERATURE=0.1
+# Max concurrent LLM tasks when parsing/scoring multiple resumes (1–16)
+MAX_PARALLEL_TASKS=4
 
 # Email (to enable sending)
 SMTP_HOST=smtp.gmail.com
@@ -121,10 +123,12 @@ Open: `http://localhost:3000`
 2) Resumes & Scoring
 - Upload up to 10 resumes → text extracted
 - Parse each resume
-- Score against parsed JD with an AI chain and structured output `ResumeScoringResult`:
+- Score against parsed JD with an AI chain (semantic/intent-first, experience‑focused) and structured output `ResumeScoringResult`:
   - `overall_score`, `hiring_decision`
   - Category scores & breakdowns
   - `keyword_matches`, `missing_keywords`, `key_strengths`, `areas_of_concern`, `next_steps`
+- Scoring weights: Basic 0.35, Skills 0.30, Experience 0.35
+- Batch processing runs in parallel; tune `MAX_PARALLEL_TASKS` to balance speed vs. rate limits
 
 3) Results & Emails
 - Best match highlighted
@@ -161,6 +165,7 @@ On errors:
 
 - Resumes
   - `POST /resumes/parse` (multipart: `parsed_jd_json`, `files`) → `ApiResponse<ResumeScoringResult[]>`
+  - `POST /resumes/parse-text` (form: `parsed_jd_json`, `resume_text`) → `ApiResponse<ResumeScoringResult>`
 
 - Email
   - `POST /email/generate` (json) → `ApiResponse<{ subject, body_text }>`
@@ -175,9 +180,17 @@ curl -s -X POST http://localhost:8000/api/v1/jd/parse \
 
 Example: Parse resumes
 ```bash
+# First, capture the parsed JD JSON from /jd/parse into $JD
+
 curl -s -X POST http://localhost:8000/api/v1/resumes/parse \
-  -F 'parsed_jd_json={"job_title":"Data Scientist","required_skills":["Python","SQL"]}' \
+  -F "parsed_jd_json=$JD" \
   -F 'files=@/path/resume1.pdf' -F 'files=@/path/resume2.docx' | jq
+
+# Or test a single resume as plain text
+curl -s -X POST http://localhost:8000/api/v1/resumes/parse-text \
+  -H 'Expect:' \
+  -F "parsed_jd_json=$JD" \
+  --form-string "resume_text=$(cat /path/resume.txt)" | jq
 ```
 
 ---
@@ -186,7 +199,7 @@ curl -s -X POST http://localhost:8000/api/v1/resumes/parse \
 - OpenAI GPT-4o (configurable via `OPENAI_CHAT_MODEL`)
   - JD generation/parse: accurate, clean outputs for downstream use
   - Resume parsing: robust extraction from noisy text
-  - Scoring: reasoned, multi-category evaluation returning structured fields
+  - Scoring: semantic/intent‑focused, experience‑weighted evaluation returning structured fields
   - Email generation: concise, professional tone and personalization
 - Temperature kept low (`~0.1`) for determinism on structured tasks; can be adjusted per your needs.
 
@@ -230,6 +243,10 @@ venv/bin/pip install email-validator
 
 - CORS errors
   - Set `BACKEND_CORS_ORIGINS` (comma-separated) in `.env` and restart backend
+
+- Slow batch scoring or 502 on `/resumes/parse`
+  - Reduce/increase `MAX_PARALLEL_TASKS` to fit your OpenAI rate limits and instance size
+  - Very large resumes can increase latency; consider truncating less relevant sections upstream
 
 ---
 
