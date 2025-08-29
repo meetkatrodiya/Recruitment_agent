@@ -39,3 +39,18 @@ def get_openai_temperature() -> float:
 def get_allowed_origins() -> List[str]:
     raw = os.getenv("BACKEND_CORS_ORIGINS", "http://localhost:3000")
     return [o.strip() for o in raw.split(",") if o.strip()] 
+
+
+@lru_cache(maxsize=1)
+def get_max_parallel_tasks() -> int:
+    """Maximum number of concurrent LLM tasks (for resume parsing/scoring)."""
+    try:
+        value = int(os.getenv("MAX_PARALLEL_TASKS", "4"))
+        # Clamp to a sensible range
+        if value < 1:
+            return 1
+        if value > 16:
+            return 16
+        return value
+    except ValueError:
+        return 4
