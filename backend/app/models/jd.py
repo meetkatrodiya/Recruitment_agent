@@ -32,14 +32,28 @@ class JDGenerationRequest(BaseModel):
 
 
 # Structured JD model for parsing/scoring chains
-class JobDescriptionParsed(BaseModel):
+class JobInformation(BaseModel):
     job_title: Optional[str] = None
-    years_of_experience: Optional[float] = None
-    required_skills: List[str] = []
-    nice_to_have_skills: List[str] = []
     company_name: Optional[str] = None
-    employment_type: Optional[str] = None
-    industry: Optional[str] = None
-    location: Optional[str] = None
-    summary: Optional[str] = None 
+    location: Optional[str]
+
+class RequiredSkills(BaseModel):
+    required: Optional[List[str]] = None
+    nice_to_have: Optional[List[str]] = None
+
+class Requirements(BaseModel):
+    required_skills: RequiredSkills
+    required_years_of_experience: Optional[int]
+    required_education_level: Optional[str]
+
+class AdditionalInformation(BaseModel):
+    benefits: Optional[List[str]] = None
+    salary_range: Optional[str]
+
+class JobDescriptionParsed(BaseModel):
+    job_information: JobInformation
+    requirements: Requirements
+    responsibilities: List[str]
+    additional_information: AdditionalInformation
+
     
