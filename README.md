@@ -291,3 +291,4 @@ Open `http://localhost:3000` and follow the workflow.
 
 ## License
 MIT (or your preferred license) – update as appropriate.
+$$

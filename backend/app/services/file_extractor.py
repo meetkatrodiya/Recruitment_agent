@@ -1,5 +1,6 @@
 from typing import List
 from io import BytesIO
+import asyncio
 from fastapi import UploadFile, HTTPException
 from PyPDF2 import PdfReader
 from docx import Document
@@ -16,9 +17,11 @@ async def extract_text_from_upload(file: UploadFile) -> str:
 
     try:
         if filename_lower.endswith(".pdf"):
-            text = extract_text_from_pdf(BytesIO(data))
+            # Offload blocking PDF parsing to a thread to avoid blocking the event loop
+            text = await asyncio.to_thread(extract_text_from_pdf, BytesIO(data))
         elif filename_lower.endswith(".docx"):
-            text = extract_text_from_docx(BytesIO(data))
+            # Offload blocking DOCX parsing to a thread
+            text = await asyncio.to_thread(extract_text_from_docx, BytesIO(data))
         elif filename_lower.endswith(".doc"):
             raise HTTPException(
                 status_code=415,
