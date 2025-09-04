@@ -5,9 +5,20 @@ from typing import Dict, List, Optional, Set
 from langchain_openai import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate
 from app.models.jd import JobDescriptionParsed
-from app.models.resume import ResumeParsed, ScoringResult, ResumeScoringResult
+from app.models.resume import (
+    ResumeParsed,
+    ScoringResult,
+    ResumeScoringResult,
+    CandidateInfo,
+    CategoryBreakdown,
+    BasicEligibilityBreakdown,
+    SkillsMatchBreakdown,
+    ExperienceContextualizationBreakdown,
+    FormattingCompletenessBreakdown,
+)
 from langchain_core.output_parsers import PydanticOutputParser
 from app.core.config import get_openai_chat_model, get_openai_temperature
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +68,12 @@ class JDParserChain:
         except Exception as e:
             logger.error("Error parsing job description (async): %s", e)
             raise ValueError(f"Failed to parse job description: {e}")
+
+
+"""
+Irrelevance handling is now embedded in the scoring prompt logic.
+We keep the gate types removed to simplify the pipeline as requested.
+"""
 
 
 class ResumeParserChain:
@@ -157,9 +174,10 @@ class SimpleScoringChain:
     IMPORTANT SCORING GUIDANCE (SEMANTIC/INTENT MATCHING):
     - Prioritize overall semantic similarity and intent alignment between the JD and the resume.
     - Consider synonyms and paraphrases as matches even if exact keywords differ.
-    - Base Skills Match and Experience Relevance primarily on semantic similarity between JD responsibilities/requirements and the resume's experience/skills.
+    - Base judgments primarily on concrete EXPERIENCE EVIDENCE performing similar responsibilities. Skills are supportive but not decisive.
     - Do not penalize for minor wording differences or missing exact phrases if the underlying capability is evidenced.
     - Missing NICE-TO-HAVE items should minimally impact Skills Match if REQUIRED items are covered reasonably; focus more on experience evidence.
+    - Partial skills coverage is acceptable. If 2–3 core/representative skills are present and the experience shows similar work, reflect a moderate Skills score rather than heavily penalizing.
     - When listing keyword_matches and missing_keywords, use short human-readable phrases (max 5 each), preserve spaces, and avoid any token normalization.
 
     Provide a concise Responsibilities-to-Experience Evidence Map (for your internal reasoning), e.g.:
@@ -172,7 +190,7 @@ class SimpleScoringChain:
     You must evaluate the candidate across five categories, but **only three categories contribute to the overall score**:
 
     --------------------------------------------------
-    1. BASIC ELIGIBILITY COMPARISON (35%):
+    1. BASIC ELIGIBILITY COMPARISON (30%):
     This is the most important category and has a strong impact on the final score.
 
     - **Years of Experience**:
@@ -190,17 +208,18 @@ class SimpleScoringChain:
         - Mark candidate as **NOT RECOMMENDED**
 
     --------------------------------------------------
-    2. SKILLS MATCH COMPARISON (30%):
+    2. SKILLS MATCH COMPARISON (20%):
     - Required Skills: List each and whether the candidate has them (these matter most)
     - Nice-to-Have Skills: Identify extras present (missing here should not significantly reduce score)
     - Skill Proficiency: Estimate based on resume info
     - Certifications: Only consider if explicitly required
+    - Do not require all required skills to be present. If 2–3 key skills are present and responsibilities/projects demonstrate adjacent capability, a mid-range score (e.g., 45–65) can be justified.
 
     Be specific:  
     "Job needs React, candidate has 3 years with React from XYZ project – MATCH"
 
     --------------------------------------------------
-    3. EXPERIENCE RELEVANCE COMPARISON (35%):
+    3. EXPERIENCE RELEVANCE COMPARISON (50%):
     - Project Domains: Relevance to job description
     - Role Progression: Does it logically lead to this role?
     - Industry Background: Same or different industry?
@@ -222,17 +241,23 @@ class SimpleScoringChain:
     SCORING & DECISION RULES:
 
     ➤ Score each of the following categories from 0–100:
-    - Basic Eligibility × 0.35
-    - Skills Match × 0.30
-    - Experience Relevance × 0.35
+    - Basic Eligibility × 0.30
+    - Skills Match × 0.20
+    - Experience Relevance × 0.50
 
     ➤ If Basic Eligibility Score ≤ 20%, apply score cap (max final score: 55)
+
+    ➤ IRRELEVANCE HANDLING (CRITICAL):
+    - If the candidate's career track, responsibilities, and project evidence do not align with the JD (e.g., Client App Developer vs AI/ML Engineer), treat as NOT RELEVANT.
+    - In such cases set Experience Relevance ≤ 10, Skills Match ≤ 20, Basic Eligibility ≤ 20.
+    - The final Overall Score must be ≤ 40 and Hiring Decision must be NOT RECOMMENDED.
+    - Provide 2–4 concise mismatch reasons in areas_of_concern (e.g., "Projects focus on mobile UI; JD requires ML model development").
 
     ➤ Recommendation Guidelines:
     - STRONG HIRE: 85–100
     - RECOMMENDED: 70–84
-    - CONSIDER: 60–69
-    - NOT RECOMMENDED: Below 60
+    - CONSIDER: 45–69
+    - NOT RECOMMENDED: Below 45
 
     ➤ Do not round scores to neat multiples unless the evidence justifies it. Use your reasoning to dynamically assign scores.
 
@@ -291,6 +316,9 @@ class SimpleScoringChain:
         except Exception as e:
             logger.error("Error scoring resume (async): %s", e)
             raise ValueError(f"Failed to score resume: {e}")
+
+    # Helper to build a low-score result when resume is not relevant
+    # Removed hardcoded irrelevant result builder per request; irrelevance is handled by the prompt and LLM output
 
 
 # ------------------------------
@@ -407,7 +435,7 @@ def _derive_recommendation(overall: float) -> str:
         return "STRONG HIRE"
     if overall >= 70:
         return "RECOMMENDED"
-    if overall >= 60:
+    if overall >= 45:
         return "CONSIDER"
     return "NOT RECOMMENDED"
 
@@ -433,6 +461,9 @@ def _post_process_scoring(result: ResumeScoringResult, features: Dict[str, objec
             req = int(features.get("required_count", 0))
             hits = int(features.get("required_hits", 0))
             coverage = (hits / req) if req > 0 else 0.0
+            # Accept partial coverage: if 2–3 key skills present, avoid overly low skills score
+            if hits >= 2 and skills < 45.0:
+                skills = 45.0
             if coverage >= 0.6:  # 60%+ required covered
                 skills = max(skills, 60.0)
             if coverage >= 0.8:  # 80%+ required covered
@@ -440,8 +471,8 @@ def _post_process_scoring(result: ResumeScoringResult, features: Dict[str, objec
         except Exception:
             pass
 
-        # Recompute overall with weights (aligned with prompt: 0.35/0.30/0.35)
-        overall = round(basic * 0.35 + skills * 0.30 + exp * 0.35, 2)
+        # Recompute overall with weights (aligned with prompt: 0.30/0.20/0.50)
+        overall = round(basic * 0.30 + skills * 0.20 + exp * 0.50, 2)
 
         # Apply cap if basic <= 20
         if basic <= 20:
